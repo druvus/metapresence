@@ -8,44 +8,58 @@ If you use Metapresence, please cite via:
 
 ## Installation
 The Python packages numpy and pysam are needed to use Metapresence. You can create a conda environment and install them in the following way:
+
+### create conda environment
 ```
-# create conda environment
 conda create -n metapresence python numpy pysam matplotlib-base
-
-# activate conda environment
-conda activate metapresence
-
-Then clone the repository and install Metapresence:
 ```
-# Clone the repository
+### activate conda environment
+```
+conda activate metapresence
+```
+Then clone the repository and install Metapresence:
+
+### Clone the repository
+```
 git clone https://github.com/your-username/metapresence.git
 cd metapresence
+```
 
-# Install the package
+### Install the package
+```
 pip install .
 ```
 
 ## Usage
 The toy_example will be used to illustrate the basic usage of Metapresence. In this example dataset, a reference database comprising seven genomes is present. 250,000 sequencing reads were generated with CAMISIM (https://github.com/CAMI-challenge/CAMISIM/) from three of these genomes (those without the suffix "_added").
 We start with a set of reference genomes and shotgun metagenomic sequencing reads. The first thing to do is to align the sequencing reads on the reference genomes to generate a sorted bam file, which can be then indexed. Bowtie2 (https://github.com/BenLangmead/bowtie2) and Samtools (https://github.com/samtools/samtools) will be used:
+
+### generate a multifasta from reference genomes
 ```
-# generate a multifasta from reference genomes
 cat ref_genomes/* > allgenomes.fasta
-
-# generate bowtie2 index
+```
+### generate bowtie2 index
+```
 bowtie2-build --threads 4 allgenomes.fasta allgenomes_index
+```
 
-# align reads with bowtie2, convert to bam and sort with samtools
+### align reads with bowtie2, convert to bam and sort with samtools
+```
 bowtie2 -1 toy_R1.fastq.gz -2 toy_R2.fastq.gz -x allgenomes_index -p 4 | samtools view -b -@ 4 | samtools sort -@ 4 > alignment.sorted.bam
-
-# generate alignment index (alignment.sorted.bam.bai) with samtools
+```
+### generate alignment index (alignment.sorted.bam.bai) with samtools
+```
 samtools index -@ 4 alignment.sorted.bam
 ```
+
 Metapresence can now be launched giving it as inputs the folder containing the reference genome files in fasta format, and the sorted bam file:
+
 ```
 metapresence ref_genomes alignment.sorted.bam -p 4 -o example
 ```
+
 < -p > option defines the number of processes to be used for parallelization. < -o > is the prefix of output files.
+
 Two output files are generated:
  - **example_metrics.tsv**: this file stores, for each genome, coverage, breadth, breadth-expected breadth ratio (BER), read-distance metric (FUG) for both group of mates, and the number of mapping reads. Only the reference genomes with at least one mapped read will be in this file.
 ```
