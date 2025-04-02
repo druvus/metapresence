@@ -3,6 +3,10 @@ Plotting utilities for metapresence.
 """
 
 import sys
+import logging
+
+# Get logger
+logger = logging.getLogger('metapresence')
 
 
 def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
@@ -19,46 +23,70 @@ def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
         import matplotlib.pyplot as plt
         import numpy as np
     except ImportError:
-        print('Warning: not able to generate the plot. Matplotlib is not installed.')
-        print('Install matplotlib with: pip install matplotlib')
+        logger.error('Cannot generate plot: matplotlib is not installed')
+        logger.info('Install matplotlib with: pip install matplotlib')
         return
+
+    logger.info(f"Creating metrics plot from {metrics_file}")
+    logger.debug(f"Plot settings: min_reads={min_reads}, unpaired={unpaired}")
 
     fug = []
     ber = []
+    genome_labels = []
 
     try:
+        logger.debug(f"Reading metrics from {metrics_file}")
         with open(metrics_file) as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 parts = line.strip().split('\t')
 
-                if parts[0] == 'genome' or len(parts) < 8:
+                if line_num == 1 or len(parts) < 8:
                     continue
 
+                genome = parts[0]
+
                 # Skip entries with too few reads
-                if float(parts[7]) < min_reads:
+                read_count = float(parts[7])
+                if read_count < min_reads:
+                    logger.debug(f"Skipping {genome} with only {read_count} reads (threshold: {min_reads})")
                     continue
 
                 # Get BER value
-                ber_value = float(parts[4])
-                ber.append(ber_value)
-
-                # Get FUG value(s)
-                if not unpaired and parts[6] != 'unpaired' and parts[6] != 'nan' and parts[5] != 'nan':
-                    fug_value = (float(parts[5]) + float(parts[6])) / 2
-                elif parts[5] != 'nan' and parts[5] != 'unpaired':
-                    fug_value = float(parts[5])
-                else:
-                    # Skip entries with invalid FUG
+                try:
+                    ber_value = float(parts[4])
+                    ber.append(ber_value)
+                except ValueError:
+                    logger.warning(f"Invalid BER value for {genome}: {parts[4]}")
                     continue
 
-                fug.append(fug_value)
+                # Get FUG value(s)
+                try:
+                    if not unpaired and parts[6] != 'unpaired' and parts[6] != 'nan' and parts[5] != 'nan':
+                        fug1 = float(parts[5])
+                        fug2 = float(parts[6])
+                        fug_value = (fug1 + fug2) / 2
+                        logger.debug(f"Using mean FUG for {genome}: {fug_value:.4f} (FUG1={fug1:.4f}, FUG2={fug2:.4f})")
+                    elif parts[5] != 'nan' and parts[5] != 'unpaired':
+                        fug_value = float(parts[5])
+                        logger.debug(f"Using FUG1 for {genome}: {fug_value:.4f}")
+                    else:
+                        logger.debug(f"Skipping {genome} with invalid FUG values: FUG1={parts[5]}, FUG2={parts[6]}")
+                        continue
+
+                    fug.append(fug_value)
+                    genome_labels.append(genome)
+                except ValueError:
+                    logger.warning(f"Invalid FUG values for {genome}: FUG1={parts[5]}, FUG2={parts[6]}")
+                    continue
     except Exception as e:
-        print(f"Error reading metrics file: {str(e)}")
+        logger.error(f"Error reading metrics file: {str(e)}")
         return
 
     if len(ber) == 0 or len(fug) == 0:
-        print("No valid data points found for plotting.")
+        logger.warning("No valid data points found for plotting")
         return
+
+    logger.debug(f"Plotting {len(ber)} data points")
 
     # Create the plot
     plt.figure(figsize=(10, 8))
@@ -72,15 +100,19 @@ def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
     plt.xlim(0, max(1.1, max(ber) * 1.1))
     plt.ylim(0, max(1.1, max(fug) * 1.1))
 
-    # Add reference lines
-    plt.axhline(y=0.5, color='red', linestyle='--', alpha=0.5)  # Default FUG threshold
-    plt.axvline(x=0.8, color='red', linestyle='--', alpha=0.5)  # Default BER threshold
+    # Add reference lines for thresholds
+    plt.axhline(y=0.5, color='red', linestyle='--', alpha=0.5, label='Default FUG threshold (0.5)')
+    plt.axvline(x=0.8, color='red', linestyle='--', alpha=0.5, label='Default BER threshold (0.8)')
+
+    # Add legend
+    plt.legend(loc='lower right')
 
     plt.tight_layout()
 
     try:
-        plt.savefig(output_plot)
+        logger.info(f"Saving plot to {output_plot}")
+        plt.savefig(output_plot, dpi=300)
         plt.close()
-        print(f"Plot saved to {output_plot}")
+        logger.info(f"Plot saved to {output_plot}")
     except Exception as e:
-        print(f"Error saving plot: {str(e)}")
+        logger.error(f"Error saving plot: {str(e)}")

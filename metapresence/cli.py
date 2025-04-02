@@ -8,6 +8,7 @@ import os
 from .core import process_alignment
 from .utils.merge import merge_abundances
 from .utils.parsing import parse_metrics
+from .utils.logging_config import setup_logging
 
 
 def main():
@@ -26,18 +27,22 @@ def main():
     parser.add_argument("--unpaired", help='--unpaired: set this flag if the aligned reads are not paired. Default: FALSE', action="store_true")
     parser.add_argument("--all_contigs", help='--all_contigs: set this flag if each contiguous sequence in < input_fasta > should be evaluated independently and be reported in the output files. If this flag is set < -input_bins > is irrelevant. Default: FALSE', action="store_true")
     parser.add_argument("--plot_metrics", help='--plot_metrics: set this flag if a scatterplot of the metric values has to be generated. Requires Matplotlib. Default: FALSE', action="store_true")
-    parser.add_argument("--quiet", help='--quiet: set this flag to silence warning messages. default: FALSE', action="store_true")
+    parser.add_argument("--quiet", help='--quiet: suppress informational messages. default: FALSE', action="store_true")
+    parser.add_argument("--verbose", help='--verbose: enable verbose logging. default: FALSE', action="store_true")
     parser.add_argument('--version', '-v', '-version', action='version', version=f'metapresence 1.0.0')
 
     args = parser.parse_args()
 
+    # Set up logging
+    logger = setup_logging(verbose=args.verbose, quiet=args.quiet)
+
     # Check input validity
     if not os.path.isdir(args.input_fasta) and not args.input_bins and not args.all_contigs:
-        print('\nError: if < input_fasta > is not a folder of fasta files, < -input_bins > must be specified or < --all_contigs > must be set. \n')
+        logger.error('If <input_fasta> is not a folder of fasta files, <-input_bins> must be specified or <--all_contigs> must be set.')
         sys.exit(1)
 
     if args.fug_criterion not in ['all', 'any', 'mean']:
-        print(f'Error. "{args.fug_criterion}" is not a valid argument for -fug_criterion. Write either "all", "any" or "mean"')
+        logger.error(f'"{args.fug_criterion}" is not a valid argument for -fug_criterion. Write either "all", "any" or "mean"')
         sys.exit(1)
 
     process_alignment(args)
@@ -48,8 +53,13 @@ def merge():
     parser = argparse.ArgumentParser(description='Merge together multiple abundance outputs from metapresence.py into a single table')
     parser.add_argument("-abundance_folder", help="Folder containing abundance outputs from metapresence.py", required=True, metavar='')
     parser.add_argument("-output_table", help="Output file to store merged abundances", required=True, metavar='')
+    parser.add_argument("--quiet", help='--quiet: suppress informational messages. default: FALSE', action="store_true")
+    parser.add_argument("--verbose", help='--verbose: enable verbose logging. default: FALSE', action="store_true")
 
     args = parser.parse_args()
+
+    # Set up logging
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
 
     merge_abundances(args.abundance_folder, args.output_table)
 
@@ -66,11 +76,16 @@ def parse():
     parser.add_argument("-fug_criterion", metavar='["all","any","mean"]', default="all", help="Write < all > if a present species must have the FUG values for both the group of mates above the threshold, < any > if only one FUG value, < mean > if the mean FUG value. Irrelevant if --unpaired is set. Default=all")
     parser.add_argument("--unpaired", help='--unpaired: set this flag if the aligned reads are not paired. Default: FALSE', action="store_true")
     parser.add_argument("--plot_metrics", help='--plot_metrics: set this flag if a scatterplot of the metric values has to be generated. Requires Matplotlib. Default: FALSE', action="store_true")
+    parser.add_argument("--quiet", help='--quiet: suppress informational messages. default: FALSE', action="store_true")
+    parser.add_argument("--verbose", help='--verbose: enable verbose logging. default: FALSE', action="store_true")
 
     args = parser.parse_args()
 
+    # Set up logging
+    logger = setup_logging(verbose=args.verbose, quiet=args.quiet)
+
     if args.fug_criterion not in ['all', 'any', 'mean']:
-        print(f'Error. "{args.fug_criterion}" is not a valid argument for -fug_criterion. Write either "all", "any" or "mean"')
+        logger.error(f'"{args.fug_criterion}" is not a valid argument for -fug_criterion. Write either "all", "any" or "mean"')
         sys.exit(1)
 
     parse_metrics(args)
