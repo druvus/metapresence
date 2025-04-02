@@ -1,14 +1,16 @@
 """
-Core functionality for metapresence.
+Core functionality for metapresence with memory optimization.
 """
 
 import os
 import sys
 import multiprocessing
 import logging
+import gc
 from .metrics import parse_metrics_criteria
 from .utils.parsing import parse_single_fasta, parse_multi_fasta, chunks
 from .utils.plot import create_metrics_plot
+from .bam_processing import process_genome, get_average_read_length
 
 # Get logger
 logger = logging.getLogger('metapresence')
@@ -27,10 +29,21 @@ except ImportError:
 
 
 # Helper function for multiprocessing - must be at module level
-def _parse_bam_wrapper(args_tuple):
-    """Wrapper function for parse_bam to make it compatible with multiprocessing."""
+def _process_genome_wrapper(args_tuple):
+    """Wrapper function for process_genome to make it compatible with multiprocessing."""
     genome_list, sorted_bam, contigs_lengths_d, genome_contigs, av_read_len, params = args_tuple
-    return parse_bam(genome_list, sorted_bam, contigs_lengths_d, genome_contigs, av_read_len, params)
+
+    results = {}
+    for genome in genome_list:
+        genome_result = process_genome(genome, genome_contigs[genome], sorted_bam,
+                                      contigs_lengths_d, genome_contigs, av_read_len, params)
+        if genome_result:
+            results.update(genome_result)
+
+    # Force garbage collection to free memory
+    gc.collect()
+
+    return results
 
 
 def process_alignment(args):
@@ -46,20 +59,68 @@ def process_alignment(args):
     processes = args.p
 
     # Parse fasta files
+    contigs_lengths_d, genome_contigs = load_reference_data(scaffold_input, args, processes)
+
+    # Read BAM file and calculate average read length
+    logger.info('Reading BAM file')
+    try:
+        av_read_len = get_average_read_length(sorted_bam)
+    except ValueError:
+        logger.error(f'Cannot find index for {sorted_bam}. Index and BAM file should be placed in the same directory.')
+        sys.exit(1)
+
+    # Process genomes and calculate metrics with memory efficiency
+    metrics_dict = process_genomes_with_multiprocessing(genome_contigs, sorted_bam, contigs_lengths_d,
+                                                      av_read_len, args, processes)
+
+    # Generate output files
+    generate_output_files(metrics_dict, args)
+
+    # Final cleanup
+    gc.collect()
+
+    logger.info('All processing complete')
+
+
+def load_reference_data(scaffold_input, args, processes):
+    """
+    Load reference genome data from FASTA files with memory optimization.
+
+    Args:
+        scaffold_input: Path to input FASTA file or directory.
+        args: Command line arguments.
+        processes: Number of processes to use for parsing.
+
+    Returns:
+        Tuple of (contigs_lengths_d, genome_contigs).
+    """
     if os.path.isdir(scaffold_input):
         logger.info('Reading fasta files')
         fastas = [os.path.join(scaffold_input, x) for x in os.listdir(scaffold_input)]
         logger.debug(f'Found {len(fastas)} fasta files')
 
-        chunked_fastas = chunks(fastas, processes)
+        # Make sure we create enough chunks to utilize available processes
+        actual_processes = min(processes, len(fastas))
+        chunked_fastas = chunks(fastas, max(1, len(fastas) // actual_processes))
         parseFasta_args = [(x, args.all_contigs) for x in chunked_fastas]
 
-        with multiprocessing.Pool(processes=processes) as pool:
-            logger.debug(f'Processing fasta files with {processes} processes')
-            all_parsing = pool.map(parse_multi_fasta, parseFasta_args)
+        contigs_lengths_d = {}
+        genome_contigs = {}
 
-        contigs_lengths_d = {x: result[0][x] for result in all_parsing for x in result[0]}
-        genome_contigs = {x: result[1][x] for result in all_parsing for x in result[1]}
+        # Process files using available processes
+        logger.debug(f'Processing fasta files using {len(chunked_fastas)} chunks with {actual_processes} processes')
+
+        with multiprocessing.Pool(processes=actual_processes) as pool:
+            for result_chunk in pool.map(parse_multi_fasta, parseFasta_args):
+                # Update dictionaries with chunk results
+                for contig, length in result_chunk[0].items():
+                    contigs_lengths_d[contig] = length
+
+                for genome, contigs_list in result_chunk[1].items():
+                    genome_contigs[genome] = contigs_list
+
+                # Force garbage collection
+                gc.collect()
 
         if args.all_contigs:
             genome_contigs = {y: [y] for x in genome_contigs for y in genome_contigs[x]}
@@ -76,250 +137,189 @@ def process_alignment(args):
         sys.exit(1)
 
     logger.info('Fasta processing complete')
+    return contigs_lengths_d, genome_contigs
 
-    # Read BAM file and calculate average read length
-    logger.info('Reading BAM file')
-    try:
-        save = pysam.set_verbosity(0)  # to avoid missing index error coming up
-        sam = pysam.AlignmentFile(sorted_bam.split()[0], "rb")
-        pysam.set_verbosity(save)
 
-        totlen = 0
-        c = 0
-        for read in sam.fetch():
-            totlen += read.query_length
-            c += 1
-            if c == 1000:
-                break
+def process_genomes_with_multiprocessing(genome_contigs, sorted_bam, contigs_lengths_d, av_read_len, args, processes):
+    """
+    Process genomes using multiprocessing with memory optimization.
 
-        av_read_len = round(totlen / c)
-        logger.debug(f'Average read length: {av_read_len}')
-        sam.close()
+    Args:
+        genome_contigs: Dictionary mapping genomes to their contigs.
+        sorted_bam: Path to the sorted BAM file.
+        contigs_lengths_d: Dictionary with contig lengths.
+        av_read_len: Average read length.
+        args: Command line arguments.
+        processes: Number of processes to use.
 
-    except ValueError:
-        logger.error(f'Cannot find index for {sorted_bam}. Index and BAM file should be placed in the same directory.')
-        sys.exit(1)
-
-    # Process BAM file and calculate metrics
-    genomes = [x for x in genome_contigs]
+    Returns:
+        Dictionary with metrics for each genome.
+    """
+    # Get list of genomes
+    genomes = list(genome_contigs.keys())
     logger.debug(f'Processing {len(genomes)} genomes')
 
-    chunked_genomes = chunks(genomes, processes)
+    # Calculate optimal number of chunks based on available processes
+    # Make sure we create at least as many chunks as processes
+    num_chunks = processes
+    if args.low_memory and len(genomes) > processes * 10:
+        # For low memory mode with many genomes, create more chunks
+        num_chunks = min(len(genomes), processes * 2)
+
+    # Create chunks with approximately equal size
+    chunk_size = max(1, len(genomes) // num_chunks)
+    chunked_genomes = [genomes[i:i+chunk_size] for i in range(0, len(genomes), chunk_size)]
+
+    # Make sure we're not creating more chunks than processes
+    while len(chunked_genomes) > processes * 2:
+        # Merge the smallest chunks
+        chunked_genomes.sort(key=len)
+        chunked_genomes[1].extend(chunked_genomes[0])
+        chunked_genomes.pop(0)
+
+    # Ensure we're not creating more chunks than genomes
+    actual_chunks = min(len(chunked_genomes), len(genomes))
+    actual_processes = min(processes, actual_chunks)
+
+    logger.debug(f'Split {len(genomes)} genomes into {actual_chunks} chunks for {actual_processes} processes')
 
     # Prepare arguments for the multiprocessing pool
     pool_args = [(genome_chunk, sorted_bam, contigs_lengths_d, genome_contigs, av_read_len, args)
-                 for genome_chunk in chunked_genomes]
+                for genome_chunk in chunked_genomes]
 
-    logger.info(f'Calculating metrics using {processes} processes')
-    with multiprocessing.Pool(processes=processes) as pool:
-        all_metrics = pool.map(_parse_bam_wrapper, pool_args)
+    # Process using available processes
+    metrics_dict = {}
+    logger.info(f'Calculating metrics using {actual_processes} processes')
+
+    # Use a pool with the calculated number of processes
+    with multiprocessing.Pool(processes=actual_processes) as pool:
+        for batch_idx, result_batch in enumerate(pool.imap(_process_genome_wrapper, pool_args)):
+            if result_batch:
+                metrics_dict.update(result_batch)
+
+            # Log progress
+            logger.debug(f'Processed batch {batch_idx+1}/{len(pool_args)} containing {len(result_batch) if result_batch else 0} genomes')
+
+            # Force garbage collection after each batch
+            gc.collect()
 
     logger.info('BAM processing complete')
-    logger.info('Preparing output files')
 
-    # Generate output files
-    metrics_dict = {}
-    for result in all_metrics:
-        if result:  # Check if result is not None
-            for x in result:
-                metrics_dict[x] = result[x]
-
+    # Sort by genome name
     metrics_dict = {x: metrics_dict[x] for x in sorted(metrics_dict.keys())}
+
+    return metrics_dict
+
+
+def generate_output_files(metrics_dict, args):
+    """
+    Generate output files based on calculated metrics.
+
+    Args:
+        metrics_dict: Dictionary with metrics for each genome.
+        args: Command line arguments.
+    """
+    logger.info('Preparing output files')
 
     # Write metrics file
     metrics_file_path = args.o + "_metrics.tsv"
     logger.info(f'Writing metrics to {metrics_file_path}')
-
-    with open(metrics_file_path, "w") as metrics_file:
-        metrics_file.write('genome\tlength\tcoverage\tbreadth\tBER\tFUG1\tFUG2\tread_count\n')
-
-        present_coverage = {}
-        for genome in metrics_dict:
-            values = metrics_dict[genome].strip().split('\t')
-            cov, ber, fug1 = float(values[1]), float(values[3]), float(values[4])
-
-            if values[5] == 'unpaired' or args.unpaired:
-                fug2 = None
-            else:
-                try:
-                    fug2 = float(values[5])
-                except ValueError:
-                    fug2 = None
-
-            nreads = int(values[6])
-
-            if parse_metrics_criteria(cov, ber, fug1, fug2, nreads, args.fug_criterion,
-                                    args.min_reads, args.max_for_fug, args.ber_threshold,
-                                    args.fug_threshold, args.unpaired):
-                present_coverage[genome] = cov
-                logger.debug(f'Genome {genome} is present with coverage {cov}')
-            else:
-                logger.debug(f'Genome {genome} is not considered present')
-
-            metrics_file.write(f'{genome}\t{metrics_dict[genome]}\n')
+    present_coverage = write_metrics_file(metrics_file_path, metrics_dict, args)
 
     # Write abundances file
     abundances_file_path = args.o + "_abundances.tsv"
     logger.info(f'Writing abundances to {abundances_file_path}')
+    write_abundances_file(abundances_file_path, present_coverage)
 
+    # Generate plot if requested
+    if args.plot_metrics:
+        # Determine output format for static plots
+        plot_format = getattr(args, 'plot_format', 'png')
+        plot_path = f"{args.o}_scatterplot.{plot_format}"
+
+        logger.info(f'Generating metrics plot at {plot_path}')
+
+        # Create the appropriate type of plot
+        create_metrics_plot(metrics_file_path, plot_path, args.min_reads, args.unpaired,
+                           interactive=getattr(args, 'interactive', False))
+
+
+def write_metrics_file(metrics_file_path, metrics_dict, args):
+    """
+    Write metrics to a TSV file.
+
+    Args:
+        metrics_file_path: Path to the output metrics file.
+        metrics_dict: Dictionary with metrics for each genome.
+        args: Command line arguments.
+
+    Returns:
+        Dictionary mapping genome names to coverage values for present genomes.
+    """
+    present_coverage = {}
+
+    with open(metrics_file_path, "w") as metrics_file:
+        metrics_file.write('genome\tlength\tcoverage\tbreadth\tBER\tFUG1\tFUG2\tread_count\n')
+
+        # Process genomes in batches to limit memory usage for large datasets
+        batch_size = 1000
+        genomes = list(metrics_dict.keys())
+
+        for i in range(0, len(genomes), batch_size):
+            batch_genomes = genomes[i:i+batch_size]
+
+            for genome in batch_genomes:
+                values = metrics_dict[genome].strip().split('\t')
+                cov, ber, fug1 = float(values[1]), float(values[3]), float(values[4])
+
+                if values[5] == 'unpaired' or args.unpaired:
+                    fug2 = None
+                else:
+                    try:
+                        fug2 = float(values[5])
+                    except ValueError:
+                        fug2 = None
+
+                nreads = int(values[6])
+
+                if parse_metrics_criteria(cov, ber, fug1, fug2, nreads, args.fug_criterion,
+                                         args.min_reads, args.max_for_fug, args.ber_threshold,
+                                         args.fug_threshold, args.unpaired):
+                    present_coverage[genome] = cov
+                    logger.debug(f'Genome {genome} is present with coverage {cov}')
+                else:
+                    logger.debug(f'Genome {genome} is not considered present')
+
+                metrics_file.write(f'{genome}\t{metrics_dict[genome]}\n')
+
+            # Force garbage collection after each batch
+            gc.collect()
+
+    return present_coverage
+
+
+def write_abundances_file(abundances_file_path, present_coverage):
+    """
+    Write abundances to a TSV file.
+
+    Args:
+        abundances_file_path: Path to the output abundances file.
+        present_coverage: Dictionary mapping genome names to coverage values for present genomes.
+    """
     with open(abundances_file_path, "w") as abundances_file:
         abundances_file.write('genome\trelative_abundance_%\n')
 
         if present_coverage:
             totcov = sum(present_coverage.values())
-            for genome in present_coverage:
+
+            # Sort by abundance (highest first) for better readability
+            sorted_genomes = sorted(present_coverage.keys(),
+                                   key=lambda g: present_coverage[g],
+                                   reverse=True)
+
+            for genome in sorted_genomes:
                 abundance = present_coverage[genome] / totcov * 100
                 abundances_file.write(f'{genome}\t{abundance}\n')
                 logger.debug(f'Genome {genome} abundance: {abundance:.2f}%')
         else:
             logger.warning('No genomes were determined to be present in the sample')
-
-    # Generate plot if requested
-    if args.plot_metrics:
-        plot_path = args.o + "_scatterplot.png"
-        logger.info(f'Generating metrics plot at {plot_path}')
-        create_metrics_plot(metrics_file_path, plot_path, args.min_reads, args.unpaired)
-
-    logger.info('All processing complete')
-
-
-def parse_bam(list_of_genomes, sorted_bam, contigs_lengths_d, genome_contigs, av_read_len, args):
-    """
-    Parse BAM file and calculate metrics for each genome.
-
-    Args:
-        list_of_genomes: List of genome names to process.
-        sorted_bam: Path to the sorted BAM file.
-        contigs_lengths_d: Dictionary with contig lengths.
-        genome_contigs: Dictionary mapping genomes to their contigs.
-        av_read_len: Average read length.
-        args: Command line arguments.
-
-    Returns:
-        Dictionary with metrics for each genome.
-    """
-    local_logger = logging.getLogger('metapresence')
-    printing_dict = {}
-    sam = pysam.AlignmentFile(sorted_bam.split()[0], "rb")
-
-    for seq in list_of_genomes:
-        local_logger.debug(f'Processing genome: {seq}')
-        genome_covbases_lengths = {}
-        noread_contig_length = 0
-        genome_readcount = 0
-        genome_pointer = 0
-        allpositions = [0]
-        allpositions2 = [0]
-
-        # Retrieve mapping positions from BAM file
-        for contig in genome_contigs[seq]:
-            if contig not in contigs_lengths_d:
-                if not args.quiet:
-                    local_logger.warning(f'Contig {contig} of sequence {seq} was not present in the fasta file(s). Skipping sequence...')
-                genome_readcount = 0
-                break
-
-            genome_change = [0] * contigs_lengths_d[contig]
-            rn = 0
-            pair_taken = set()
-
-            try:
-                for read in sam.fetch(contig=contig):
-                    rn += 1
-                    start_pos = read.reference_start
-                    end_pos = start_pos + read.query_length
-
-                    if read.query_name not in pair_taken:
-                        allpositions.append(start_pos + genome_pointer)
-                        pair_taken.add(read.query_name)
-                    else:
-                        allpositions2.append(start_pos + genome_pointer)
-
-                    if start_pos < len(genome_change):
-                        genome_change[start_pos] += 1
-                    else:
-                        continue
-
-                    if end_pos < len(genome_change):
-                        genome_change[end_pos] -= 1
-                    else:
-                        continue
-
-            except ValueError:
-                pass
-
-            genome_pointer += contigs_lengths_d[contig]
-
-            if rn == 0:
-                noread_contig_length += contigs_lengths_d[contig]
-                if seq in genome_covbases_lengths:
-                    genome_covbases_lengths[seq][0] += contigs_lengths_d[contig]
-                    genome_covbases_lengths[seq][1] += contigs_lengths_d[contig]
-                    genome_covbases_lengths[seq][2] += 0
-                    continue
-                else:
-                    genome_covbases_lengths[seq] = [contigs_lengths_d[contig], contigs_lengths_d[contig], 0]
-                    continue
-
-            # Calculate contig depth
-            current_coverage = 0
-            total_depth = 0
-            zerodepth = 0
-
-            for position in range(contigs_lengths_d[contig]):
-                current_coverage = current_coverage + genome_change[position]
-                if current_coverage == 0:
-                    zerodepth += 1
-                    continue
-                total_depth += current_coverage
-
-            if seq in genome_covbases_lengths:
-                genome_covbases_lengths[seq][0] += zerodepth
-                genome_covbases_lengths[seq][1] += contigs_lengths_d[contig]
-                genome_covbases_lengths[seq][2] += total_depth
-            else:
-                genome_covbases_lengths[seq] = [zerodepth, contigs_lengths_d[contig], total_depth]
-
-            genome_readcount += rn
-
-        # Skip genomes with zero mapped reads
-        if genome_readcount == 0:
-            local_logger.debug(f'Genome {seq} has zero mapped reads')
-            continue
-
-        # Add fake read at the end of the genome
-        allpositions.append(genome_covbases_lengths[seq][1] - av_read_len)
-        allpositions2.append(genome_covbases_lengths[seq][1] - av_read_len)
-
-        # Calculate metrics for the current genome
-        window_size = round(genome_covbases_lengths[seq][1] / (len(allpositions)))
-
-        if window_size > 0:
-            distances = np.array(allpositions[1:]) - np.array(allpositions[:-1])
-            hist = np.histogram(distances, bins=range(window_size, np.max(distances) + 1))[0]
-            frequency = hist / (len(allpositions) - 1)
-            gennext_read_ratio = (window_size - (np.sum(frequency * np.arange(len(frequency))))) / window_size
-        else:
-            gennext_read_ratio = 'nan'
-
-        if not args.unpaired:
-            window_size = round(genome_covbases_lengths[seq][1] / (len(allpositions2)))
-            if window_size > 0:
-                distances = np.array(allpositions2[1:]) - np.array(allpositions2[:-1])
-                hist, edges = np.histogram(distances, bins=range(window_size, np.max(distances) + 1))
-                frequency = hist / (len(allpositions2) - 1)
-                gennext_read_ratio2 = (window_size - (np.sum(frequency * np.arange(len(frequency))))) / window_size
-            else:
-                gennext_read_ratio2 = 'nan'
-        else:
-            gennext_read_ratio2 = 'unpaired'
-
-        coverage = genome_covbases_lengths[seq][2] / genome_covbases_lengths[seq][1]
-        breadth = (genome_covbases_lengths[seq][1] - genome_covbases_lengths[seq][0]) / genome_covbases_lengths[seq][1]
-        beb_ratio = breadth / (1 - np.exp(-0.883 * coverage))
-
-        printing_dict[seq] = f"{genome_covbases_lengths[seq][1]}\t{coverage}\t{breadth}\t{beb_ratio}\t{gennext_read_ratio}\t{gennext_read_ratio2}\t{genome_readcount}"
-        local_logger.debug(f'Calculated metrics for {seq}: coverage={coverage:.4f}, breadth={breadth:.4f}, BER={beb_ratio:.4f}')
-
-    sam.close()
-    return printing_dict
