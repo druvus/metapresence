@@ -5,20 +5,24 @@ Core functionality for metapresence.
 import os
 import sys
 import multiprocessing
+import logging
 from .metrics import parse_metrics_criteria
 from .utils.parsing import parse_single_fasta, parse_multi_fasta, chunks
 from .utils.plot import create_metrics_plot
 
+# Get logger
+logger = logging.getLogger('metapresence')
+
 try:
     import numpy as np
 except ImportError:
-    print('Error: numpy is not installed.')
+    logger.error('Error: numpy is not installed.')
     sys.exit(1)
 
 try:
     import pysam
 except ImportError:
-    print('Error: pysam is not installed.')
+    logger.error('Error: pysam is not installed.')
     sys.exit(1)
 
 
@@ -43,12 +47,15 @@ def process_alignment(args):
 
     # Parse fasta files
     if os.path.isdir(scaffold_input):
-        print('Reading fasta files')
+        logger.info('Reading fasta files')
         fastas = [os.path.join(scaffold_input, x) for x in os.listdir(scaffold_input)]
+        logger.debug(f'Found {len(fastas)} fasta files')
+
         chunked_fastas = chunks(fastas, processes)
         parseFasta_args = [(x, args.all_contigs) for x in chunked_fastas]
 
         with multiprocessing.Pool(processes=processes) as pool:
+            logger.debug(f'Processing fasta files with {processes} processes')
             all_parsing = pool.map(parse_multi_fasta, parseFasta_args)
 
         contigs_lengths_d = {x: result[0][x] for result in all_parsing for x in result[0]}
@@ -57,18 +64,21 @@ def process_alignment(args):
         if args.all_contigs:
             genome_contigs = {y: [y] for x in genome_contigs for y in genome_contigs[x]}
 
+        logger.debug(f'Found {len(contigs_lengths_d)} contigs in {len(genome_contigs)} genomes')
+
     elif os.path.isfile(scaffold_input):
-        print('Reading fasta file')
+        logger.info('Reading fasta file')
         contigs_lengths_d, genome_contigs = parse_single_fasta(scaffold_input, args.input_bins, args.all_contigs)
+        logger.debug(f'Found {len(contigs_lengths_d)} contigs in {len(genome_contigs)} genomes')
 
     else:
-        print(f'Error: cannot open {scaffold_input}\naborted')
+        logger.error(f'Cannot open {scaffold_input}')
         sys.exit(1)
 
-    print('\tdone\n')
+    logger.info('Fasta processing complete')
 
     # Read BAM file and calculate average read length
-    print('Reading bam file')
+    logger.info('Reading BAM file')
     try:
         save = pysam.set_verbosity(0)  # to avoid missing index error coming up
         sam = pysam.AlignmentFile(sorted_bam.split()[0], "rb")
@@ -83,25 +93,29 @@ def process_alignment(args):
                 break
 
         av_read_len = round(totlen / c)
+        logger.debug(f'Average read length: {av_read_len}')
         sam.close()
 
     except ValueError:
-        print(f'Error: cannot find index for {sorted_bam}. Index and bam file should be placed in the same directory.\nAborted')
+        logger.error(f'Cannot find index for {sorted_bam}. Index and BAM file should be placed in the same directory.')
         sys.exit(1)
 
     # Process BAM file and calculate metrics
     genomes = [x for x in genome_contigs]
+    logger.debug(f'Processing {len(genomes)} genomes')
+
     chunked_genomes = chunks(genomes, processes)
 
     # Prepare arguments for the multiprocessing pool
     pool_args = [(genome_chunk, sorted_bam, contigs_lengths_d, genome_contigs, av_read_len, args)
                  for genome_chunk in chunked_genomes]
 
+    logger.info(f'Calculating metrics using {processes} processes')
     with multiprocessing.Pool(processes=processes) as pool:
         all_metrics = pool.map(_parse_bam_wrapper, pool_args)
 
-    print('\tdone\n')
-    print('preparing output files\n')
+    logger.info('BAM processing complete')
+    logger.info('Preparing output files')
 
     # Generate output files
     metrics_dict = {}
@@ -113,7 +127,10 @@ def process_alignment(args):
     metrics_dict = {x: metrics_dict[x] for x in sorted(metrics_dict.keys())}
 
     # Write metrics file
-    with open(args.o + "_metrics.tsv", "w") as metrics_file:
+    metrics_file_path = args.o + "_metrics.tsv"
+    logger.info(f'Writing metrics to {metrics_file_path}')
+
+    with open(metrics_file_path, "w") as metrics_file:
         metrics_file.write('genome\tlength\tcoverage\tbreadth\tBER\tFUG1\tFUG2\tread_count\n')
 
         present_coverage = {}
@@ -135,24 +152,35 @@ def process_alignment(args):
                                     args.min_reads, args.max_for_fug, args.ber_threshold,
                                     args.fug_threshold, args.unpaired):
                 present_coverage[genome] = cov
+                logger.debug(f'Genome {genome} is present with coverage {cov}')
+            else:
+                logger.debug(f'Genome {genome} is not considered present')
 
             metrics_file.write(f'{genome}\t{metrics_dict[genome]}\n')
 
     # Write abundances file
-    with open(args.o + "_abundances.tsv", "w") as abundances_file:
+    abundances_file_path = args.o + "_abundances.tsv"
+    logger.info(f'Writing abundances to {abundances_file_path}')
+
+    with open(abundances_file_path, "w") as abundances_file:
         abundances_file.write('genome\trelative_abundance_%\n')
 
         if present_coverage:
             totcov = sum(present_coverage.values())
             for genome in present_coverage:
-                abundances_file.write(f'{genome}\t{present_coverage[genome] / totcov * 100}\n')
+                abundance = present_coverage[genome] / totcov * 100
+                abundances_file.write(f'{genome}\t{abundance}\n')
+                logger.debug(f'Genome {genome} abundance: {abundance:.2f}%')
+        else:
+            logger.warning('No genomes were determined to be present in the sample')
 
     # Generate plot if requested
     if args.plot_metrics:
-        create_metrics_plot(args.o + "_metrics.tsv", args.o + "_scatterplot.png",
-                          args.min_reads, args.unpaired)
+        plot_path = args.o + "_scatterplot.png"
+        logger.info(f'Generating metrics plot at {plot_path}')
+        create_metrics_plot(metrics_file_path, plot_path, args.min_reads, args.unpaired)
 
-    print('All done!\n')
+    logger.info('All processing complete')
 
 
 def parse_bam(list_of_genomes, sorted_bam, contigs_lengths_d, genome_contigs, av_read_len, args):
@@ -170,10 +198,12 @@ def parse_bam(list_of_genomes, sorted_bam, contigs_lengths_d, genome_contigs, av
     Returns:
         Dictionary with metrics for each genome.
     """
+    local_logger = logging.getLogger('metapresence')
     printing_dict = {}
     sam = pysam.AlignmentFile(sorted_bam.split()[0], "rb")
 
     for seq in list_of_genomes:
+        local_logger.debug(f'Processing genome: {seq}')
         genome_covbases_lengths = {}
         noread_contig_length = 0
         genome_readcount = 0
@@ -185,7 +215,7 @@ def parse_bam(list_of_genomes, sorted_bam, contigs_lengths_d, genome_contigs, av
         for contig in genome_contigs[seq]:
             if contig not in contigs_lengths_d:
                 if not args.quiet:
-                    print(f'Warning: contig {contig} of sequence {seq} was not present in the fasta file(s). Skipping sequence...')
+                    local_logger.warning(f'Contig {contig} of sequence {seq} was not present in the fasta file(s). Skipping sequence...')
                 genome_readcount = 0
                 break
 
@@ -254,6 +284,7 @@ def parse_bam(list_of_genomes, sorted_bam, contigs_lengths_d, genome_contigs, av
 
         # Skip genomes with zero mapped reads
         if genome_readcount == 0:
+            local_logger.debug(f'Genome {seq} has zero mapped reads')
             continue
 
         # Add fake read at the end of the genome
@@ -288,6 +319,7 @@ def parse_bam(list_of_genomes, sorted_bam, contigs_lengths_d, genome_contigs, av
         beb_ratio = breadth / (1 - np.exp(-0.883 * coverage))
 
         printing_dict[seq] = f"{genome_covbases_lengths[seq][1]}\t{coverage}\t{breadth}\t{beb_ratio}\t{gennext_read_ratio}\t{gennext_read_ratio2}\t{genome_readcount}"
+        local_logger.debug(f'Calculated metrics for {seq}: coverage={coverage:.4f}, breadth={breadth:.4f}, BER={beb_ratio:.4f}')
 
     sam.close()
     return printing_dict
