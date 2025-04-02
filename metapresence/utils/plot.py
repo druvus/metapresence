@@ -4,12 +4,14 @@ Plotting utilities for metapresence.
 
 import sys
 import logging
+import os
+from .interactive_plot import create_interactive_metrics_plot
 
 # Get logger
 logger = logging.getLogger('metapresence')
 
 
-def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
+def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired, interactive=False):
     """
     Create a scatterplot of BER vs FUG metrics.
 
@@ -18,7 +20,18 @@ def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
         output_plot: Path to the output plot file.
         min_reads: Minimum read threshold.
         unpaired: Whether reads are unpaired.
+        interactive: Whether to create an interactive plot.
     """
+    if interactive:
+        # Change output file extension to .html for interactive plots
+        base_name = os.path.splitext(output_plot)[0]
+        output_html = base_name + '.html'
+
+        # Create interactive plot
+        create_interactive_metrics_plot(metrics_file, output_html, min_reads, unpaired)
+        return
+
+    # Traditional static plot with matplotlib
     try:
         import matplotlib.pyplot as plt
         import numpy as np
@@ -33,6 +46,7 @@ def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
     fug = []
     ber = []
     genome_labels = []
+    coverage_values = []
 
     try:
         logger.debug(f"Reading metrics from {metrics_file}")
@@ -75,6 +89,10 @@ def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
 
                     fug.append(fug_value)
                     genome_labels.append(genome)
+
+                    # Get coverage value for coloring
+                    coverage_values.append(float(parts[2]))
+
                 except ValueError:
                     logger.warning(f"Invalid FUG values for {genome}: FUG1={parts[5]}, FUG2={parts[6]}")
                     continue
@@ -90,7 +108,14 @@ def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
 
     # Create the plot
     plt.figure(figsize=(10, 8))
-    plt.scatter(ber, fug, alpha=0.7)
+
+    # Create scatter plot with coverage-based coloring
+    scatter = plt.scatter(ber, fug, alpha=0.7, c=coverage_values, cmap='viridis',
+                         s=[max(20, min(300, c*20)) for c in coverage_values])
+
+    # Add colorbar
+    cbar = plt.colorbar(scatter)
+    cbar.set_label('Coverage')
 
     plt.xlabel('BER (Breadth-Expected Breadth Ratio)')
     plt.ylabel('FUG (Fraction of Unexpected Gaps)' if unpaired else 'Mean FUG')
@@ -107,6 +132,16 @@ def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
     # Add legend
     plt.legend(loc='lower right')
 
+    # Add annotations for the highest coverage genomes (top 5)
+    if len(genome_labels) > 0:
+        top_indices = sorted(range(len(coverage_values)), key=lambda i: coverage_values[i], reverse=True)[:5]
+        for idx in top_indices:
+            plt.annotate(genome_labels[idx].split('.')[0],
+                        (ber[idx], fug[idx]),
+                        xytext=(5, 5),
+                        textcoords='offset points',
+                        fontsize=8)
+
     plt.tight_layout()
 
     try:
@@ -116,3 +151,6 @@ def create_metrics_plot(metrics_file, output_plot, min_reads, unpaired):
         logger.info(f"Plot saved to {output_plot}")
     except Exception as e:
         logger.error(f"Error saving plot: {str(e)}")
+
+    # Clean up
+    plt.close('all')

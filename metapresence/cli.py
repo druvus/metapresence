@@ -24,11 +24,26 @@ def main():
     parser.add_argument("-min_reads", type=int, metavar='[int]', default=80, help="Number of mapped reads on a given genome below which it is considered absent. Default: 80")
     parser.add_argument("-max_for_fug", type=float, metavar='[float]', default=0.1, help="Coverage value above which only BER metric is used. Default=0.1")
     parser.add_argument("-fug_criterion", metavar='["all","any","mean"]', default="all", help="Write < all > if a present species must have the FUG values for both the group of mates above the threshold, < any > if only one FUG value, < mean > if the mean FUG value. Irrelevant if --unpaired is set. Default=all")
+
+    # File format options
+    parser.add_argument("--stream", help="Use streaming mode for large BAM files to reduce memory usage. May be slower but uses less memory. Default: FALSE", action="store_true")
+    parser.add_argument("--batch_size", type=int, default=10000, help="Number of reads to process in each batch when using streaming mode. Default: 10000")
+
+    # Basic options
     parser.add_argument("--unpaired", help='--unpaired: set this flag if the aligned reads are not paired. Default: FALSE', action="store_true")
     parser.add_argument("--all_contigs", help='--all_contigs: set this flag if each contiguous sequence in < input_fasta > should be evaluated independently and be reported in the output files. If this flag is set < -input_bins > is irrelevant. Default: FALSE', action="store_true")
-    parser.add_argument("--plot_metrics", help='--plot_metrics: set this flag if a scatterplot of the metric values has to be generated. Requires Matplotlib. Default: FALSE', action="store_true")
-    parser.add_argument("--quiet", help='--quiet: suppress informational messages. default: FALSE', action="store_true")
-    parser.add_argument("--verbose", help='--verbose: enable verbose logging. default: FALSE', action="store_true")
+
+    # Visualization options
+    parser.add_argument("--plot_metrics", help='--plot_metrics: set this flag if a scatterplot of the metric values has to be generated. Default: FALSE', action="store_true")
+    parser.add_argument("--interactive", help='--interactive: create interactive HTML plots instead of static images. Requires Plotly. Default: FALSE', action="store_true")
+    parser.add_argument("--plot_format", choices=["png", "svg", "pdf"], default="png", help="Format for static plots. Default: png")
+
+    # Memory management options
+    parser.add_argument("--low_memory", help="Optimize for low memory usage. May be slower but uses less memory. Default: FALSE", action="store_true")
+
+    # Logging options
+    parser.add_argument("--quiet", help='--quiet: suppress informational messages. Default: FALSE', action="store_true")
+    parser.add_argument("--verbose", help='--verbose: enable verbose logging. Default: FALSE', action="store_true")
     parser.add_argument('--version', '-v', '-version', action='version', version=f'metapresence 1.0.0')
 
     args = parser.parse_args()
@@ -45,6 +60,22 @@ def main():
         logger.error(f'"{args.fug_criterion}" is not a valid argument for -fug_criterion. Write either "all", "any" or "mean"')
         sys.exit(1)
 
+    # Check for required packages based on options
+    if args.interactive:
+        try:
+            import plotly.graph_objects
+            logger.info("Using interactive plots with Plotly")
+        except ImportError:
+            logger.warning("Plotly is not installed. Interactive plots will not be generated.")
+            logger.info("Install plotly with: pip install plotly")
+            args.interactive = False
+
+    if args.low_memory:
+        logger.info("Running in low memory mode - this may be slower but will use less RAM")
+
+    if args.stream:
+        logger.info(f"Using streaming mode for BAM processing with batch size {args.batch_size}")
+
     process_alignment(args)
 
 
@@ -53,15 +84,39 @@ def merge():
     parser = argparse.ArgumentParser(description='Merge together multiple abundance outputs from metapresence.py into a single table')
     parser.add_argument("-abundance_folder", help="Folder containing abundance outputs from metapresence.py", required=True, metavar='')
     parser.add_argument("-output_table", help="Output file to store merged abundances", required=True, metavar='')
+
+    # Visualization options for merged data
+    parser.add_argument("--visualize", help="Generate visualization of merged abundances", action="store_true")
+    parser.add_argument("--interactive", help="Create interactive HTML visualization. Requires Plotly", action="store_true")
+
+    # Standard options
     parser.add_argument("--quiet", help='--quiet: suppress informational messages. default: FALSE', action="store_true")
     parser.add_argument("--verbose", help='--verbose: enable verbose logging. default: FALSE', action="store_true")
+    parser.add_argument("--low_memory", help="Optimize for low memory usage. May be slower but uses less memory. Default: FALSE", action="store_true")
 
     args = parser.parse_args()
 
     # Set up logging
-    setup_logging(verbose=args.verbose, quiet=args.quiet)
+    logger = setup_logging(verbose=args.verbose, quiet=args.quiet)
 
-    merge_abundances(args.abundance_folder, args.output_table)
+    # Check for required packages based on options
+    if args.interactive:
+        try:
+            import plotly.graph_objects
+        except ImportError:
+            logger.warning("Plotly is not installed. Interactive plots will not be generated.")
+            logger.info("Install plotly with: pip install plotly")
+            args.interactive = False
+
+    merge_abundances(args.abundance_folder, args.output_table, low_memory=args.low_memory)
+
+    # TODO: Add visualization of merged abundance data if requested
+    if args.visualize:
+        try:
+            from .utils.visualize_merged import create_merged_visualization
+            create_merged_visualization(args.output_table, interactive=args.interactive)
+        except ImportError as e:
+            logger.error(f"Could not generate visualization: {str(e)}")
 
 
 def parse():
@@ -74,10 +129,14 @@ def parse():
     parser.add_argument("-min_reads", type=int, metavar='[int]', default=80, help="Number of mapped reads on a given genome below which it is considered absent. Default: 80")
     parser.add_argument("-max_for_fug", type=float, metavar='[float]', default=0.1, help="Coverage value above which only BER metric is used. Default=0.1")
     parser.add_argument("-fug_criterion", metavar='["all","any","mean"]', default="all", help="Write < all > if a present species must have the FUG values for both the group of mates above the threshold, < any > if only one FUG value, < mean > if the mean FUG value. Irrelevant if --unpaired is set. Default=all")
+
+    # Standard options
     parser.add_argument("--unpaired", help='--unpaired: set this flag if the aligned reads are not paired. Default: FALSE', action="store_true")
     parser.add_argument("--plot_metrics", help='--plot_metrics: set this flag if a scatterplot of the metric values has to be generated. Requires Matplotlib. Default: FALSE', action="store_true")
+    parser.add_argument("--interactive", help='--interactive: create interactive HTML plots instead of static images. Requires Plotly. Default: FALSE', action="store_true")
     parser.add_argument("--quiet", help='--quiet: suppress informational messages. default: FALSE', action="store_true")
     parser.add_argument("--verbose", help='--verbose: enable verbose logging. default: FALSE', action="store_true")
+    parser.add_argument("--low_memory", help="Optimize for low memory usage. May be slower but uses less memory. Default: FALSE", action="store_true")
 
     args = parser.parse_args()
 
@@ -87,6 +146,15 @@ def parse():
     if args.fug_criterion not in ['all', 'any', 'mean']:
         logger.error(f'"{args.fug_criterion}" is not a valid argument for -fug_criterion. Write either "all", "any" or "mean"')
         sys.exit(1)
+
+    # Check for required packages based on options
+    if args.interactive:
+        try:
+            import plotly.graph_objects
+        except ImportError:
+            logger.warning("Plotly is not installed. Interactive plots will not be generated.")
+            logger.info("Install plotly with: pip install plotly")
+            args.interactive = False
 
     parse_metrics(args)
 
