@@ -11,7 +11,7 @@ The Python packages numpy and pysam are needed to use Metapresence. You can crea
 
 ### create conda environment
 ```
-conda create -n metapresence python numpy pysam matplotlib-base
+conda create -n metapresence python numpy pysam matplotlib-base plotly scipy
 ```
 ### activate conda environment
 ```
