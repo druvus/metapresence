@@ -9,23 +9,23 @@ If you use Metapresence, please cite via:
 ## Installation
 The Python packages numpy and pysam are needed to use Metapresence. You can create a conda environment and install them in the following way:
 
-### create conda environment
+Create conda environment
 ```
 conda create -n metapresence python numpy pysam matplotlib-base plotly scipy
 ```
-### activate conda environment
+Activate conda environment
 ```
 conda activate metapresence
 ```
 Then clone the repository and install Metapresence:
 
-### Clone the repository
+Clone the repository
 ```
 git clone https://github.com/your-username/metapresence.git
 cd metapresence
 ```
 
-### Install the package
+Install the package
 ```
 pip install .
 ```
@@ -34,20 +34,20 @@ pip install .
 The toy_example will be used to illustrate the basic usage of Metapresence. In this example dataset, a reference database comprising seven genomes is present. 250,000 sequencing reads were generated with CAMISIM (https://github.com/CAMI-challenge/CAMISIM/) from three of these genomes (those without the suffix "_added").
 We start with a set of reference genomes and shotgun metagenomic sequencing reads. The first thing to do is to align the sequencing reads on the reference genomes to generate a sorted bam file, which can be then indexed. Bowtie2 (https://github.com/BenLangmead/bowtie2) and Samtools (https://github.com/samtools/samtools) will be used:
 
-### generate a multifasta from reference genomes
+Generate a multifasta from reference genomes
 ```
 cat ref_genomes/* > allgenomes.fasta
 ```
-### generate bowtie2 index
+Generate bowtie2 index
 ```
 bowtie2-build --threads 4 allgenomes.fasta allgenomes_index
 ```
 
-### align reads with bowtie2, convert to bam and sort with samtools
+Align reads with bowtie2, convert to bam and sort with samtools
 ```
 bowtie2 -1 toy_R1.fastq.gz -2 toy_R2.fastq.gz -x allgenomes_index -p 4 | samtools view -b -@ 4 | samtools sort -@ 4 > alignment.sorted.bam
 ```
-### generate alignment index (alignment.sorted.bam.bai) with samtools
+Generate alignment index (alignment.sorted.bam.bai) with samtools
 ```
 samtools index -@ 4 alignment.sorted.bam
 ```
